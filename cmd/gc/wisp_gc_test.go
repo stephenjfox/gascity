@@ -774,6 +774,128 @@ func TestWispGC_DeleteErrorIsSurfacedAndContinues(t *testing.T) {
 	assertDeletedIDs(t, store.deletedIDs, "mol-2")
 }
 
+func TestIsWispGCSerializationConflict(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"1213 serialization", errors.New("Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client"), true},
+		{"sqlstate only", errors.New("commit failed (SQLSTATE 40001)"), true},
+		{"parenthesized state", errors.New("Error 1213 (40001): deadlock"), true},
+		{"plain delete", errors.New("delete failed"), false},
+		{"encoding serialization", errors.New("serialization failed while encoding metadata"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isWispGCSerializationConflict(tc.err); got != tc.want {
+				t.Fatalf("isWispGCSerializationConflict(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWispGC_RetriesSerializationConflictThenPurges(t *testing.T) {
+	withWispGCSerializationBackoff(t, 0)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+	})
+	hits := 0
+	store.deleteHook = func(id string) error {
+		if id != "mol-1" {
+			return nil
+		}
+		hits++
+		if hits < wispGCSerializationAttempts {
+			return errors.New("Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client")
+		}
+		return nil
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if hits != wispGCSerializationAttempts {
+		t.Fatalf("delete tries = %d, want %d", hits, wispGCSerializationAttempts)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+}
+
+func TestWispGC_SQLSTATE40001IsRetried(t *testing.T) {
+	withWispGCSerializationBackoff(t, 0)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+	})
+	hits := 0
+	store.deleteHook = func(id string) error {
+		if id != "mol-1" {
+			return nil
+		}
+		hits++
+		if hits == 1 {
+			return errors.New("commit failed (SQLSTATE 40001)")
+		}
+		return nil
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if hits != 2 {
+		t.Fatalf("delete tries = %d, want 2", hits)
+	}
+}
+
+func TestWispGC_SerializationConflictExhaustionIsSurfaced(t *testing.T) {
+	withWispGCSerializationBackoff(t, 0)
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBead("mol-2", now.Add(-2*time.Hour), "closed", "molecule"),
+	})
+	store.deleteHook = func(id string) error {
+		if id == "mol-1" {
+			return errors.New("Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client")
+		}
+		return nil
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+	if err == nil {
+		t.Fatal("expected exhausted serialization conflict to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "1213") {
+		t.Fatalf("err = %v, want the 1213 conflict", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 (the sibling still deletes)", purged)
+	}
+	mol1Tries := 0
+	for _, id := range store.deleteAttempts {
+		if id == "mol-1" {
+			mol1Tries++
+		}
+	}
+	if mol1Tries != wispGCSerializationAttempts {
+		t.Fatalf("mol-1 delete tries = %d, want %d", mol1Tries, wispGCSerializationAttempts)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "mol-2")
+}
+
 func TestWispGC_PurgesExpiredMoleculeChildrenWithRoot(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -2687,6 +2809,10 @@ type gcTestStore struct {
 	// assert that a batch cap bounds delete ATTEMPTS and not merely successful
 	// deletes (a failed delete leaves no trace in deletedIDs).
 	deleteAttempts []string
+	// deleteHook, when set, runs before deleteErrors. A non-nil error
+	// fails that Delete. Nil continues into the normal delete path, so a
+	// test can fail the first tries and then let the bead delete.
+	deleteHook func(id string) error
 	// childrenCalls and depListCalls count the leaf-ness probes the rootless
 	// orphan branch performs. Each is one backend read in production (BdStore
 	// runs a bd subprocess per call), so tests assert the probe cap bounds them
@@ -2730,6 +2856,11 @@ func (s *gcTestStore) DepList(id, direction string) ([]beads.Dep, error) {
 
 func (s *gcTestStore) Delete(id string) error {
 	s.deleteAttempts = append(s.deleteAttempts, id)
+	if s.deleteHook != nil {
+		if err := s.deleteHook(id); err != nil {
+			return err
+		}
+	}
 	if err := s.deleteErrors[id]; err != nil {
 		return err
 	}
@@ -2810,6 +2941,13 @@ func makeGCOrphanWisp(id string, createdAt time.Time, rootID string) beads.Bead 
 
 // withReapOrphansEnforced toggles the orphan-reap enforcement indirection for
 // the duration of a test, restoring the prior value on cleanup.
+func withWispGCSerializationBackoff(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := wispGCSerializationBackoff
+	wispGCSerializationBackoff = d
+	t.Cleanup(func() { wispGCSerializationBackoff = prev })
+}
+
 func withReapOrphansEnforced(t *testing.T, enforce bool) {
 	t.Helper()
 	prev := reapOrphansEnforced

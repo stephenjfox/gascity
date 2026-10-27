@@ -114,6 +114,16 @@ var infraSessionPurgeAgeWarnOnce = &sync.Once{}
 // sweep deletes. The backlog drains across ticks instead of one unbounded pass.
 var wispGCSessionPurgeBatchCap = 500
 
+// wispGCSerializationAttempts is how many times one purge delete is tried
+// when Dolt reports error 1213 or SQLSTATE 40001. That conflict commits
+// nothing, so the same delete is safe to repeat. The last failure is what
+// the tick reports. Other delete errors are not retried.
+var wispGCSerializationAttempts = 3
+
+// wispGCSerializationBackoff is the base pause between those tries.
+// Tests set it to 0.
+var wispGCSerializationBackoff = 25 * time.Millisecond
+
 // wispGCSessionPurgeScanCap bounds how many candidates one sweep examines,
 // kept or deleted. A session that still owns children is kept, and it counts
 // against this budget, so the per-tick Children/DepList/Get probes stay bounded
@@ -563,7 +573,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			continue
 		}
 
-		err := deleteWorkflowBead(store, c.ID)
+		err := retryWispGCSerialization(func() error {
+			return deleteWorkflowBead(store, c.ID)
+		})
 		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 			// A closed orphan can itself be an intermediate step that still
 			// owns open sub-steps; the delete refuses those. That is a skip,
@@ -1074,7 +1086,9 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
-		err := deleteFn(store, entry.ID)
+		err := retryWispGCSerialization(func() error {
+			return deleteFn(store, entry.ID)
+		})
 		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 			// The strand guard refused the closure delete: an open descendant
 			// the closure collector did not see still holds the root. That is
@@ -1096,6 +1110,37 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		purged++
 	}
 	return purged, deleteErr
+}
+
+// isWispGCSerializationConflict reports a Dolt/MySQL serialization conflict
+// the purge can repeat. 1213 and SQLSTATE 40001 commit nothing. A bare
+// "serialization" wording does not match: that also names encoding failures.
+func isWispGCSerializationConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "error 1213") ||
+		strings.Contains(msg, "sqlstate 40001") ||
+		strings.Contains(msg, "(40001)")
+}
+
+// retryWispGCSerialization runs op up to wispGCSerializationAttempts times
+// while it fails with a serialization conflict. The attempt budget is per
+// bead, inside the sweep's batch cap, so a conflict does not walk the rest
+// of the backlog and a stuck conflict does not multiply the cap.
+func retryWispGCSerialization(op func() error) error {
+	var err error
+	for attempt := 1; attempt <= wispGCSerializationAttempts; attempt++ {
+		err = op()
+		if err == nil || !isWispGCSerializationConflict(err) || attempt == wispGCSerializationAttempts {
+			return err
+		}
+		if wispGCSerializationBackoff > 0 {
+			time.Sleep(time.Duration(attempt) * wispGCSerializationBackoff)
+		}
+	}
+	return err
 }
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
