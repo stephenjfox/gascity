@@ -423,7 +423,7 @@ func TestWorkerSiteMailSendNotifiedMeansAWakeWasRecorded(t *testing.T) {
 			dials := countSocketDials(t)
 
 			var stdout, stderr bytes.Buffer
-			if code := cmdMailSendJSON([]string{"worker", "check the deploy"}, true, false, "human", "", "", "", "", true, &stdout, &stderr); code != 0 {
+			if code := cmdMailSendJSON([]string{"worker", "check the deploy"}, true, false, "human", "", "", "", "", "", true, &stdout, &stderr); code != 0 {
 				t.Fatalf("gc mail send --notify on a worker site = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
 			var result struct {
@@ -478,7 +478,7 @@ func TestWorkerSiteMailNotifyUnderRequireRecordsTheWake(t *testing.T) {
 				t.Setenv("GC_OPS_CONTENT", "require")
 			}
 			var stdout, stderr bytes.Buffer
-			if code := cmdMailSendJSON([]string{"worker", "check the deploy"}, true, false, "human", "", "", "", "", true, &stdout, &stderr); code != 0 {
+			if code := cmdMailSendJSON([]string{"worker", "check the deploy"}, true, false, "human", "", "", "", "", "", true, &stdout, &stderr); code != 0 {
 				t.Fatalf("gc mail send --notify = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
 			var result struct {

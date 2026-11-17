@@ -44,6 +44,10 @@ const (
 	// sent through [DedupSender.SendDeduped]. Repeating notifiers (patrol
 	// orders, maintenance loops) use it to suppress duplicate alerts.
 	DedupKeyMetadataKey = "mail.dedup_key"
+	// ReplyAddressMetadataKey stores the mailbox a sender declared for
+	// replies (see [ReplyAddressSender]). A reply goes there instead of to the
+	// sending session.
+	ReplyAddressMetadataKey = "mail.reply_address"
 )
 
 // Message represents a mail message between agents or humans.
@@ -115,6 +119,19 @@ type DedupSender interface {
 	// otherwise the newly created message, stamped with key under
 	// [DedupKeyMetadataKey].
 	SendDeduped(from, to, subject, body, key string) (msg Message, suppressed bool, err error)
+}
+
+// ReplyAddressSender is an optional [Provider] capability: a send that names
+// the mailbox replies go to. A session that will close before anyone answers
+// (a pool session that drains after mailing) names a durable mailbox, so a
+// later reply has a live reader. The sender still appears as itself. Providers
+// that cannot store the address don't implement the interface, and callers
+// refuse the send rather than drop the address.
+type ReplyAddressSender interface {
+	// SendWithReplyAddress is [Provider.Send] with replyAddress stored under
+	// [ReplyAddressMetadataKey]; [Provider.Reply] to the message is addressed
+	// to replyAddress.
+	SendWithReplyAddress(from, to, subject, body, replyAddress string) (Message, error)
 }
 
 // Provider is the internal interface for mail backends and the canonical

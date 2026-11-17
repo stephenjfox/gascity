@@ -1872,6 +1872,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var message string
 	var jsonOut bool
 	var dedupKey string
+	var replyTo string
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
 		Short: "Send a message to a session alias or human",
@@ -1894,7 +1895,12 @@ Suppression exits 0. Once the recipient archives the message the stream may
 alert again; senders that want a longer re-alert cadence keep their own
 last-sent state. Dedup needs a provider that can query its own message
 history. The built-in provider can; one that cannot sends normally and says
-so on stderr, because a duplicate notification beats a dropped one.`,
+so on stderr, because a duplicate notification beats a dropped one.
+
+Use --reply-to <address> to send replies to another mailbox. A session that
+closes before anyone answers (a pool session that drains after mailing)
+names a mailbox with a live reader, and still appears as the sender. The
+address must resolve like a recipient.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
   gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
@@ -1902,10 +1908,11 @@ so on stderr, because a duplicate notification beats a dropped one.`,
   gc mail send human "Review needed for PR #42"
   gc mail send worker "Priority task" --notify
   gc mail send --all "Status update: tests passing"
-  gc mail send worker -s "disk warning" --dedup "disk-warn:hq"`,
+  gc mail send worker -s "disk warning" --dedup "disk-warn:hq"
+  gc mail send human -s "Question" -m "Which option?" --reply-to mayor`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := cmdMailSendJSON(args, notify, all, from, to, subject, message, dedupKey, jsonOut, stdout, stderr)
+			code := cmdMailSendJSON(args, notify, all, from, to, subject, message, dedupKey, replyTo, jsonOut, stdout, stderr)
 			if code != 0 {
 				return errExit
 			}
@@ -1923,7 +1930,10 @@ so on stderr, because a duplicate notification beats a dropped one.`,
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	cmd.Flags().StringVar(&dedupKey, "dedup", "", "suppress the send while a live message with this dedup key is in the same mailbox (provider permitting)")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
+	cmd.Flags().StringVar(&replyTo, "reply-to", "", "mailbox that replies go to (default: the sender)")
 	cmd.MarkFlagsMutuallyExclusive("dedup", "all")
+	cmd.MarkFlagsMutuallyExclusive("reply-to", "all")
+	cmd.MarkFlagsMutuallyExclusive("reply-to", "dedup")
 	return cmd
 }
 
@@ -2149,14 +2159,16 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 //
 //nolint:unparam // test-only CLI shim; notify/all are exercised via cmdMailSendJSON from the cobra command
 func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
-	return cmdMailSendJSON(args, notify, all, from, to, subject, message, "", false, stdout, stderr)
+	return cmdMailSendJSON(args, notify, all, from, to, subject, message, "", "", false, stdout, stderr)
 }
 
-// cmdMailSendJSON is cmdMailSend with the dedup key and JSON-output controls
-// exposed. A non-empty dedupKey routes the send through the provider's
-// [mail.DedupSender] capability so a repeating notifier keeps at most one live
-// copy; an empty dedupKey sends unconditionally.
-func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
+// cmdMailSendJSON is cmdMailSend with the dedup key, reply address and
+// JSON-output controls exposed. A non-empty dedupKey routes the send through
+// the provider's [mail.DedupSender] capability so a repeating notifier keeps at
+// most one live copy; an empty dedupKey sends unconditionally. A non-empty
+// replyTo resolves like a recipient and is sent through
+// [mail.ReplyAddressSender].
+func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, dedupKey string, replyTo string, jsonOut bool, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -2285,6 +2297,21 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 			validRecipients[canonicalTo] = true
 		}
 	}
+	if replyTo != "" {
+		if store != nil {
+			canonical, err := resolveMailRecipientIdentityCached(cityPath, cfg, sessStore, replyTo, idCache)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mail send: unknown reply address %q: %v\n", replyTo, err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			replyTo = canonical
+		}
+		var err error
+		if mp, err = withReplyAddress(mp, replyTo); err != nil {
+			fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	if all {
 		rec := openCityRecorder(stderr)
@@ -2293,6 +2320,29 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 
 	rec := openCityRecorder(stderr)
 	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr)
+}
+
+// replyAddressProvider is a provider whose Send declares replyAddress for
+// replies.
+type replyAddressProvider struct {
+	mail.Provider
+	sender       mail.ReplyAddressSender
+	replyAddress string
+}
+
+func (p replyAddressProvider) Send(from, to, subject, body string) (mail.Message, error) {
+	return p.sender.SendWithReplyAddress(from, to, subject, body, p.replyAddress)
+}
+
+// withReplyAddress wraps mp so that its sends declare replyAddress. A provider
+// without [mail.ReplyAddressSender] is refused: sending without the address
+// would leave the reply with no live reader.
+func withReplyAddress(mp mail.Provider, replyAddress string) (mail.Provider, error) {
+	sender, ok := mp.(mail.ReplyAddressSender)
+	if !ok {
+		return nil, fmt.Errorf("mail provider does not support --reply-to")
+	}
+	return replyAddressProvider{Provider: mp, sender: sender, replyAddress: replyAddress}, nil
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]

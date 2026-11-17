@@ -30,6 +30,15 @@ suppression as best effort rather than a guarantee.
 gc mail send worker -s "disk warning" -m "..." --dedup "disk-warn:hq"
 ```
 
+A reply goes to the session that sent the message. If your session will
+close before anyone answers (you drain after mailing), add
+`--reply-to <address>` so the reply reaches a mailbox with a live reader. You
+still appear as the sender.
+
+```
+gc mail send human -s "Question" -m "..." --reply-to mayor
+```
+
 ## Reading
 
 ```

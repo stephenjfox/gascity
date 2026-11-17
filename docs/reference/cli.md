@@ -2894,6 +2894,11 @@ last-sent state. Dedup needs a provider that can query its own message
 history. The built-in provider can; one that cannot sends normally and says
 so on stderr, because a duplicate notification beats a dropped one.
 
+Use --reply-to &lt;address&gt; to send replies to another mailbox. A session that
+closes before anyone answers (a pool session that drains after mailing)
+names a mailbox with a live reader, and still appears as the sender. The
+address must resolve like a recipient.
+
 ```
 gc mail send [<to>] [<body>] [flags]
 ```
@@ -2909,6 +2914,7 @@ gc mail send human "Review needed for PR #42"
 gc mail send worker "Priority task" --notify
 gc mail send --all "Status update: tests passing"
 gc mail send worker -s "disk warning" --dedup "disk-warn:hq"
+gc mail send human -s "Question" -m "Which option?" --reply-to mayor
 ```
 
 | Flag | Type | Default | Description |
@@ -2919,6 +2925,7 @@ gc mail send worker -s "disk warning" --dedup "disk-warn:hq"
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
+| `--reply-to` | string |  | mailbox that replies go to (default: the sender) |
 | `-s`, `--subject` | string |  | message subject line |
 | `--to` | string |  | recipient address (alternative to positional argument) |
 

@@ -186,6 +186,19 @@ func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra m
 	return beadToMessage(b), nil
 }
 
+// SendWithReplyAddress implements the optional [mail.ReplyAddressSender]
+// capability: Send, with replies addressed to replyAddress.
+func (p *Provider) SendWithReplyAddress(from, to, subject, body, replyAddress string) (mail.Message, error) {
+	replyAddress = strings.TrimSpace(replyAddress)
+	if replyAddress == "" {
+		return mail.Message{}, fmt.Errorf("beadmail send: reply address is required")
+	}
+	if to == "" {
+		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
+	}
+	return p.sendWithExtraMetadata(from, to, subject, body, map[string]string{mail.ReplyAddressMetadataKey: replyAddress})
+}
+
 // SendDeduped implements the optional [mail.DedupSender] capability: it
 // creates the message unless a live (un-archived) message carrying the same
 // dedup key, addressed to the same mailbox, already exists. "Same mailbox" is
@@ -847,7 +860,8 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 
 // Reply creates a reply to an existing message. Inherits ThreadID from the
 // original, sets ReplyTo to the original's ID. Reply is addressed to the
-// original sender.
+// original's declared reply address when it has one
+// ([mail.ReplyAddressSender]), otherwise to the original sender's session.
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	original, err := p.store.Get(id)
 	if err != nil {
@@ -856,17 +870,9 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	if isRemovedMessageBead(original) {
 		return mail.Message{}, beadmailError("reply", beads.ErrNotFound)
 	}
-	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
-	to := toSessionID
-	if to == "" {
-		to = strings.TrimSpace(original.From)
-	}
+	to, toSessionID, toDisplay := replyRecipient(original)
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
-	}
-	toDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
-	if toDisplay == "" {
-		toDisplay = strings.TrimSpace(original.From)
 	}
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
@@ -903,6 +909,25 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// replyRecipient is where a reply to original goes: the declared reply
+// address, else the sender's session id, else the sender as written. toSessionID
+// is set only when the reply goes to the sender's session.
+func replyRecipient(original beads.Bead) (to, toSessionID, toDisplay string) {
+	if address := strings.TrimSpace(original.Metadata[mail.ReplyAddressMetadataKey]); address != "" {
+		return address, "", address
+	}
+	toSessionID = strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
+	to = toSessionID
+	if to == "" {
+		to = strings.TrimSpace(original.From)
+	}
+	toDisplay = strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
+	if toDisplay == "" {
+		toDisplay = strings.TrimSpace(original.From)
+	}
+	return to, toSessionID, toDisplay
 }
 
 // beadmailError wraps a store error for the given mail operation, deliberately
