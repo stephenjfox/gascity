@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -86,11 +87,20 @@ func TestCmdMailSendReplyToRefusesUnknownAddress(t *testing.T) {
 	}
 }
 
-// TestWithReplyAddressRefusesProviderWithoutCapability: a provider that cannot
+// TestMailSendReplyToRefusesProviderWithoutCapability: a provider that cannot
 // store the address fails the send instead of dropping the address, which
 // would orphan the reply again.
-func TestWithReplyAddressRefusesProviderWithoutCapability(t *testing.T) {
-	if _, err := withReplyAddress(mail.NewFake(), "mayor"); err == nil {
-		t.Fatal("withReplyAddress(fake) succeeded, want error")
+func TestMailSendReplyToRefusesProviderWithoutCapability(t *testing.T) {
+	mp := mail.NewFake() // fake provider: no SendWithReplyAddress
+	var stdout, stderr bytes.Buffer
+	args := []string{"human", "subject", "body"}
+	if code := doMailSendJSON(mp, events.Discard, map[string]bool{"human": true}, "worker", args, nil, "", "mayor", false, &stdout, &stderr); code == 0 {
+		t.Fatalf("send = 0, want failure; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "does not support --reply-to") {
+		t.Fatalf("stderr = %q, want unsupported --reply-to", stderr.String())
+	}
+	if msgs, _ := mp.Inbox("human"); len(msgs) != 0 {
+		t.Fatalf("human inbox = %+v, want nothing sent", msgs)
 	}
 }

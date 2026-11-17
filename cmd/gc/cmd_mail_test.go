@@ -137,7 +137,7 @@ func TestMailSendJSON(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var stdout, stderr bytes.Buffer
-	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, "", true, &stdout, &stderr)
+	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, "", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -167,7 +167,7 @@ func TestMailSendDedupSuppressesDuplicate(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	args := []string{"mayor", "quarantine: hq", "marker exists"}
-	code := doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", false, &stdout, &stderr)
+	code := doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("first send = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -176,7 +176,7 @@ func TestMailSendDedupSuppressesDuplicate(t *testing.T) {
 	}
 
 	stdout.Reset()
-	code = doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", false, &stdout, &stderr)
+	code = doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("second send = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -202,12 +202,12 @@ func TestMailSendDedupJSONReportsAlreadyDone(t *testing.T) {
 
 	args := []string{"mayor", "quarantine: hq", "marker exists"}
 	var first bytes.Buffer
-	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", true, &first, &bytes.Buffer{}); code != 0 {
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", "", true, &first, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("first send = %d, want 0", code)
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", true, &stdout, &stderr); code != 0 {
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", "", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("second send = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	var got struct {
@@ -235,7 +235,7 @@ func TestMailSendDedupFallsBackWithoutCapability(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	args := []string{"mayor", "subject", "body"}
-	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", false, &stdout, &stderr); code != 0 {
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("send = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "does not support --dedup") {

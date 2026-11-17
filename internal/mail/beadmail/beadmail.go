@@ -146,16 +146,17 @@ func (c *sessionInfoCache) isFresh(now time.Time) bool {
 // Returns an error if to is empty: blank recipients produce messages that never
 // appear in any inbox but still inflate global counts.
 func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
-	if to == "" {
-		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
-	}
 	return p.sendWithExtraMetadata(from, to, subject, body, nil)
 }
 
-// sendWithExtraMetadata is the shared body of Send and SendDeduped: resolve
-// the sender route, derive title and thread label, merge extra metadata (the
-// dedup key), and create the message bead.
+// sendWithExtraMetadata is the shared body of Send, SendDeduped and
+// SendWithReplyAddress: resolve the sender route, derive title and thread
+// label, merge extra metadata (the dedup key or reply address), and create the
+// message bead. A blank recipient is refused.
 func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra map[string]string) (mail.Message, error) {
+	if to == "" {
+		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
+	}
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
@@ -192,9 +193,6 @@ func (p *Provider) SendWithReplyAddress(from, to, subject, body, replyAddress st
 	replyAddress = strings.TrimSpace(replyAddress)
 	if replyAddress == "" {
 		return mail.Message{}, fmt.Errorf("beadmail send: reply address is required")
-	}
-	if to == "" {
-		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
 	}
 	return p.sendWithExtraMetadata(from, to, subject, body, map[string]string{mail.ReplyAddressMetadataKey: replyAddress})
 }

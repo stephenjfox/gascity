@@ -2306,11 +2306,6 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 			}
 			replyTo = canonical
 		}
-		var err error
-		if mp, err = withReplyAddress(mp, replyTo); err != nil {
-			fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
 	}
 
 	if all {
@@ -2319,44 +2314,24 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr)
-}
-
-// replyAddressProvider is a provider whose Send declares replyAddress for
-// replies.
-type replyAddressProvider struct {
-	mail.Provider
-	sender       mail.ReplyAddressSender
-	replyAddress string
-}
-
-func (p replyAddressProvider) Send(from, to, subject, body string) (mail.Message, error) {
-	return p.sender.SendWithReplyAddress(from, to, subject, body, p.replyAddress)
-}
-
-// withReplyAddress wraps mp so that its sends declare replyAddress. A provider
-// without [mail.ReplyAddressSender] is refused: sending without the address
-// would leave the reply with no live reader.
-func withReplyAddress(mp mail.Provider, replyAddress string) (mail.Provider, error) {
-	sender, ok := mp.(mail.ReplyAddressSender)
-	if !ok {
-		return nil, fmt.Errorf("mail provider does not support --reply-to")
-	}
-	return replyAddressProvider{Provider: mp, sender: sender, replyAddress: replyAddress}, nil
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, dedupKey, replyTo, jsonOut, stdout, stderr)
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
 // or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil, the
 // recipient is nudged after message creation (skipped for "human").
 func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, "", false, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, "", "", false, stdout, stderr)
 }
 
-// doMailSendJSON is doMailSend with the JSON-output and dedup controls exposed.
-// A non-empty dedupKey routes through the provider's [mail.DedupSender]
-// capability; providers without it fall back to a plain send (fail-open, since
-// a duplicate notification beats a silently dropped one).
-func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
+// doMailSendJSON is doMailSend with the JSON-output, dedup and reply-address
+// controls exposed. A non-empty dedupKey routes through the provider's
+// [mail.DedupSender] capability; providers without it fall back to a plain send
+// (fail-open, since a duplicate notification beats a silently dropped one). A
+// non-empty replyTo routes through [mail.ReplyAddressSender]; providers without
+// it refuse the send, since dropping the address would leave the reply with no
+// live reader.
+func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, dedupKey, replyTo string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -2383,14 +2358,22 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		suppressed bool
 		err        error
 	)
-	if dedupKey != "" {
+	switch {
+	case dedupKey != "":
 		if ds, ok := mp.(mail.DedupSender); ok {
 			m, suppressed, err = ds.SendDeduped(sender, to, subject, body, dedupKey)
 		} else {
 			fmt.Fprintln(stderr, "gc mail send: mail provider does not support --dedup; sending without dedup") //nolint:errcheck // best-effort stderr
 			m, err = mp.Send(sender, to, subject, body)
 		}
-	} else {
+	case replyTo != "":
+		rs, ok := mp.(mail.ReplyAddressSender)
+		if !ok {
+			fmt.Fprintln(stderr, "gc mail send: mail provider does not support --reply-to") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		m, err = rs.SendWithReplyAddress(sender, to, subject, body, replyTo)
+	default:
 		m, err = mp.Send(sender, to, subject, body)
 	}
 	telemetry.RecordMailOp(context.Background(), "send", err)

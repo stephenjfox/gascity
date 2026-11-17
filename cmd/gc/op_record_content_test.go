@@ -489,7 +489,7 @@ func TestMailSendNotifyOpsPerRecipient(t *testing.T) {
 	args := []string{"a", "subject", "body"}
 	for i := 0; i < 2; i++ {
 		stdout.Reset()
-		if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nf, "dedup-1", false, &stdout, &stderr); code != 0 {
+		if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nf, "dedup-1", "", false, &stdout, &stderr); code != 0 {
 			t.Fatalf("dedup send %d = %d; stderr=%s", i, code, stderr.String())
 		}
 	}
